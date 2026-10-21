@@ -5,6 +5,8 @@
 #include <QTimer>
 #include <QPropertyAnimation>
 
+class QScreen;
+
 class SpinningCirclesWidget : public QWidget
 {
     Q_OBJECT
@@ -13,7 +15,7 @@ class SpinningCirclesWidget : public QWidget
     Q_PROPERTY(qreal opacity READ opacity WRITE setOpacity)
 
 public:
-    explicit SpinningCirclesWidget(QWidget *parent = nullptr);
+    explicit SpinningCirclesWidget(QScreen *screen, QWidget *parent = nullptr);
     ~SpinningCirclesWidget();
 
     qreal rotationAngle() const { return m_rotationAngle; }
@@ -24,6 +26,7 @@ public:
     void setOpacity(qreal opacity);
 
     void hideAnimated();
+    void centerOn(QScreen *screen);
 
 signals:
     void animationFinished();

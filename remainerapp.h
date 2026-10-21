@@ -10,6 +10,7 @@
 #include <QList>
 #include <QScreen>
 #include <QDateTime>
+#include <QSettings>
 
 class EventMonitor;
 class LightEffectWidget;
@@ -38,6 +39,9 @@ private slots:
     void onStopOneHourAction();
     void onActiveAction();
     void onStartupAction();
+    void onSettingsAction();
+    void onPauseInVmToggled(bool checked);
+    void onScreensChanged();
 
 private:
     enum InactivityState {
@@ -51,11 +55,20 @@ private:
     void updateInactivityState();
     void showEffectForState(InactivityState state);
     void hideAllEffects();
+    void showSpinningCircles();
+    void hideSpinningCircles();
     void createTrayMenu();
     void updateTrayIcon();
     bool isStartupEnabled() const;
     void setStartupEnabled(bool enabled);
     void updateStartupMenuAction();
+    void loadSettings();
+    void saveSettings();
+    bool openSettingsDialog();
+    void reevaluateInactivity();
+    InactivityState stateForElapsed(qint64 elapsedMs) const;
+    bool isVirtualMachineForeground() const;
+    QSettings appSettings() const;
 
     EventMonitor *m_eventMonitor;
     QSystemTrayIcon *m_trayIcon;
@@ -64,6 +77,8 @@ private:
     QAction *m_stopOneHourAction;
     QAction *m_activeAction;
     QAction *m_startupAction;
+    QAction *m_pauseInVmAction;
+    QAction *m_settingsAction;
 
     QTimer *m_inactivityTimer;
     QElapsedTimer m_elapsedTimer;
@@ -75,9 +90,16 @@ private:
     QDateTime m_stopUntilTime;
     QPoint m_lastMousePosition;
 
+    bool m_shapesEnabled;
+    int m_shapesIntervalSec;
+    bool m_fullscreenEnabled;
+    int m_fullscreenIntervalSec;
+    bool m_pauseInVm;
+    bool m_settingsConfigured;
+
     // Effect widgets
     LightEffectWidget *m_lightEffect;
-    SpinningCirclesWidget *m_spinningCircles;
+    QList<SpinningCirclesWidget*> m_spinningCircles;
     QList<BlastWidget*> m_blastWidgets;
     QList<OpacityOverlayWidget*> m_opacityOverlays;
     QList<ColoredWidget*> m_coloredWidgets;

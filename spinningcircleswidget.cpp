@@ -4,13 +4,14 @@
 #include <QEasingCurve>
 #include <QScreen>
 #include <QApplication>
+#include <QtGlobal>
 #include <cmath>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-SpinningCirclesWidget::SpinningCirclesWidget(QWidget *parent)
+SpinningCirclesWidget::SpinningCirclesWidget(QScreen *screen, QWidget *parent)
     : QWidget(parent)
     , m_rotationAngle(0)
     , m_colorRotationAngle(0)
@@ -21,10 +22,7 @@ SpinningCirclesWidget::SpinningCirclesWidget(QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground);
     setStyleSheet("background: transparent;");
 
-    // Get screen size and position at center, scale to 400x400
-    QScreen *screen = QApplication::primaryScreen();
-    QRect screenGeometry = screen->geometry();
-    setGeometry(screenGeometry.width() / 2 - 200, screenGeometry.height() / 2 - 200, 400, 400);
+    centerOn(screen);
 
     // Circles rotate clockwise (CW) - positive rotation, slower for better visibility
     m_rotationAnimation = new QPropertyAnimation(this, "rotationAngle", this);
@@ -76,6 +74,26 @@ void SpinningCirclesWidget::setOpacity(qreal opacity)
 {
     m_opacity = opacity;
     update();
+}
+
+void SpinningCirclesWidget::centerOn(QScreen *screen)
+{
+    if (!screen)
+        screen = QApplication::primaryScreen();
+    if (!screen)
+        return;
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    setScreen(screen);
+#endif
+
+    // Center a 400x400 widget on this screen, including its virtual-desktop origin.
+    const int size = 400;
+    const QRect screenGeometry = screen->geometry();
+    setGeometry(screenGeometry.x() + (screenGeometry.width() - size) / 2,
+                screenGeometry.y() + (screenGeometry.height() - size) / 2,
+                size,
+                size);
 }
 
 void SpinningCirclesWidget::hideAnimated()

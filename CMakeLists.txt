@@ -26,6 +26,8 @@ set(PROJECT_SOURCES
         opacityoverlaywidget.h
         coloredwidget.cpp
         coloredwidget.h
+        settingsdialog.cpp
+        settingsdialog.h
         remainerapp.cpp
         remainerapp.h
 )

@@ -5,7 +5,9 @@
 #include "blastwidget.h"
 #include "opacityoverlaywidget.h"
 #include "coloredwidget.h"
+#include "settingsdialog.h"
 #include <QApplication>
+#include <QGuiApplication>
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QTimer>
@@ -22,24 +24,28 @@
 #include <QStandardPaths>
 #include <QCoreApplication>
 
-// ============================================================================
-// TIME CONFIGURATION - Adjust these values to change inactivity thresholds
-// ============================================================================
-// All times are in milliseconds
-static const qint64 TIME_TEN_SECONDS = 7000;        // 7 seconds - Spinning circles start (normal state ends)
-static const qint64 TIME_TWENTY_SECONDS = 30000;     // 20 seconds - Blast effect (DISABLED)
-static const qint64 TIME_ONE_MINUTE = 60000;         // 1 minute - Opacity overlay (DISABLED)
-static const qint64 TIME_FIVE_MINUTES = 37000;      // 37 seconds - Colored widgets start (spinning state ends after 30s)
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#endif
+#endif
+
+static const int DEFAULT_SHAPES_INTERVAL_SEC = 7;
+static const int DEFAULT_FULLSCREEN_INTERVAL_SEC = 37;
 static const int BLAST_INTERVAL_MS = 1000;           // Blast effect interval (1 second) - DISABLED
 
-
-// All times are in milliseconds
-// static const qint64 TIME_TEN_SECONDS = 5000;        // 10 seconds - Spinning circles
-// static const qint64 TIME_TWENTY_SECONDS = 30000;     // 20 seconds - Blast effect
-// static const qint64 TIME_ONE_MINUTE = 60000;         // 1 minute - Opacity overlay
-// static const qint64 TIME_FIVE_MINUTES = 120000;      // 5 minutes - Colored widgets
-// static const int BLAST_INTERVAL_MS = 1000;           // Blast effect interval (1 second)
-// ============================================================================
+static int clampIntervalSec(int seconds)
+{
+    if (seconds < 1)
+        return 1;
+    if (seconds > 86400)
+        return 86400;
+    return seconds;
+}
 
 RemainerApp::RemainerApp(QObject *parent)
     : QObject(parent)
@@ -49,13 +55,21 @@ RemainerApp::RemainerApp(QObject *parent)
     , m_stopAction(nullptr)
     , m_stopOneHourAction(nullptr)
     , m_activeAction(nullptr)
+    , m_startupAction(nullptr)
+    , m_pauseInVmAction(nullptr)
+    , m_settingsAction(nullptr)
     , m_inactivityTimer(nullptr)
     , m_blastTimer(nullptr)
     , m_currentState(Normal)
     , m_isActive(true)
     , m_isStopped(false)
+    , m_shapesEnabled(true)
+    , m_shapesIntervalSec(DEFAULT_SHAPES_INTERVAL_SEC)
+    , m_fullscreenEnabled(true)
+    , m_fullscreenIntervalSec(DEFAULT_FULLSCREEN_INTERVAL_SEC)
+    , m_pauseInVm(true)
+    , m_settingsConfigured(false)
     , m_lightEffect(nullptr)
-    , m_spinningCircles(nullptr)
 {
     m_inactivityTimer = new QTimer(this);
     m_inactivityTimer->setSingleShot(false);
@@ -86,6 +100,8 @@ void RemainerApp::initialize()
         QMessageBox::critical(nullptr, "Error", "Failed to start event monitoring!");
         return;
     }
+
+    loadSettings();
 
     // Create system tray
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
@@ -125,7 +141,20 @@ void RemainerApp::initialize()
     
     m_trayIcon->show();
 
-    // Start inactivity timer
+    connect(qApp, &QGuiApplication::screenAdded, this, [this](QScreen *) {
+        onScreensChanged();
+    });
+    connect(qApp, &QGuiApplication::screenRemoved, this, [this](QScreen *) {
+        onScreensChanged();
+    });
+
+    if (!m_settingsConfigured) {
+        openSettingsDialog();
+        m_settingsConfigured = true;
+        saveSettings();
+    }
+
+    // Start inactivity timer after settings are chosen
     m_inactivityTimer->start();
     m_elapsedTimer.restart();
 }
@@ -157,25 +186,7 @@ void RemainerApp::onInactivityTimer()
         return;
     }
 
-    qint64 elapsedMs = m_elapsedTimer.elapsed();
-    InactivityState newState = Normal;
-
-    if (elapsedMs >= TIME_FIVE_MINUTES) {
-        newState = FiveMinutes;
-    } else if (elapsedMs >= TIME_TEN_SECONDS) {
-        newState = TenSeconds;
-    }
-    // DISABLED: Methods 3
-    // } else if (elapsedMs >= TIME_ONE_MINUTE) {
-    //     newState = OneMinute;
-    // } else if (elapsedMs >= TIME_TWENTY_SECONDS) {
-    //     newState = TwentySeconds;
-    // }
-
-    if (newState != m_currentState) {
-        m_currentState = newState;
-        updateInactivityState();
-    }
+    reevaluateInactivity();
 }
 
 void RemainerApp::onBlastTimer()
@@ -205,6 +216,9 @@ void RemainerApp::updateInactivityState()
     if (!m_isActive || m_isStopped)
         return;
 
+    if (m_currentState == Normal)
+        return;
+
     showEffectForState(m_currentState);
 }
 
@@ -231,13 +245,11 @@ void RemainerApp::showEffectForState(InactivityState state)
             light->hideAnimated();
         }
         
-        if (!m_spinningCircles) {
-            m_spinningCircles = new SpinningCirclesWidget();
-            m_spinningCircles->show();
-        } else if (!m_spinningCircles->isVisible()) {
-            // Widget exists but was hidden, show it again
-            m_spinningCircles->show();
-        }
+        showSpinningCircles();
+        break;
+
+    case TwentySeconds:
+    case OneMinute:
         break;
 
     // DISABLED: Method 3 - TwentySeconds (Blast effect)
@@ -280,14 +292,7 @@ void RemainerApp::showEffectForState(InactivityState state)
             light->hideAnimated();
         }
 
-        // Hide spinning circles when transitioning to 5 minutes
-        if (m_spinningCircles) {
-            SpinningCirclesWidget *spinning = m_spinningCircles;
-            m_spinningCircles = nullptr;
-            connect(spinning, &SpinningCirclesWidget::animationFinished, 
-                    spinning, &QWidget::deleteLater, Qt::QueuedConnection);
-            spinning->hideAnimated();
-        }
+        hideSpinningCircles();
 
         // DISABLED: Method 3 - Opacity overlays cleanup (not used anymore)
         // // Hide opacity overlays
@@ -327,14 +332,7 @@ void RemainerApp::hideAllEffects()
         light->hideAnimated();
     }
 
-    // Hide spinning circles with smooth fade-out
-    if (m_spinningCircles) {
-        SpinningCirclesWidget *spinning = m_spinningCircles;
-        m_spinningCircles = nullptr; // Clear pointer immediately to prevent re-entry
-        connect(spinning, &SpinningCirclesWidget::animationFinished, 
-                spinning, &QWidget::deleteLater, Qt::QueuedConnection);
-        spinning->hideAnimated();
-    }
+    hideSpinningCircles();
 
     // DISABLED: Method 3 - Blast effect cleanup
     // // Stop blast timer
@@ -377,6 +375,16 @@ void RemainerApp::createTrayMenu()
     m_activeAction->setCheckable(true);
     m_activeAction->setChecked(true);
     connect(m_activeAction, &QAction::triggered, this, &RemainerApp::onActiveAction);
+
+    m_trayMenu->addSeparator();
+
+    m_pauseInVmAction = m_trayMenu->addAction("Pause when virtual machine is active");
+    m_pauseInVmAction->setCheckable(true);
+    m_pauseInVmAction->setChecked(m_pauseInVm);
+    connect(m_pauseInVmAction, &QAction::toggled, this, &RemainerApp::onPauseInVmToggled);
+
+    m_settingsAction = m_trayMenu->addAction("Settings...");
+    connect(m_settingsAction, &QAction::triggered, this, &RemainerApp::onSettingsAction);
 
     m_trayMenu->addSeparator();
 
@@ -548,4 +556,218 @@ void RemainerApp::onStartupAction()
 {
     bool currentlyEnabled = isStartupEnabled();
     setStartupEnabled(!currentlyEnabled);
+}
+
+void RemainerApp::showSpinningCircles()
+{
+    if (!m_spinningCircles.isEmpty())
+        return;
+
+    const QList<QScreen *> screens = QApplication::screens();
+    for (QScreen *screen : screens) {
+        SpinningCirclesWidget *spinning = new SpinningCirclesWidget(screen);
+        spinning->show();
+        // Re-apply after the native window exists so each monitor gets its own widget.
+        spinning->centerOn(screen);
+        m_spinningCircles.append(spinning);
+    }
+}
+
+void RemainerApp::hideSpinningCircles()
+{
+    const QList<SpinningCirclesWidget *> spinningToRemove = m_spinningCircles;
+    m_spinningCircles.clear();
+    for (SpinningCirclesWidget *spinning : spinningToRemove) {
+        if (!spinning)
+            continue;
+        connect(spinning, &SpinningCirclesWidget::animationFinished,
+                spinning, &QWidget::deleteLater, Qt::QueuedConnection);
+        spinning->hideAnimated();
+    }
+}
+
+void RemainerApp::onScreensChanged()
+{
+    if (m_currentState != TenSeconds || !m_isActive || m_isStopped)
+        return;
+
+    hideSpinningCircles();
+    showSpinningCircles();
+}
+
+QSettings RemainerApp::appSettings() const
+{
+    return QSettings(QStringLiteral("Remainer"), QStringLiteral("Remainer"));
+}
+
+void RemainerApp::loadSettings()
+{
+    QSettings settings = appSettings();
+    m_settingsConfigured = settings.value(QStringLiteral("settingsConfigured"), false).toBool();
+    m_shapesEnabled = settings.value(QStringLiteral("shapesEnabled"), true).toBool();
+    m_shapesIntervalSec = clampIntervalSec(
+        settings.value(QStringLiteral("shapesIntervalSec"), DEFAULT_SHAPES_INTERVAL_SEC).toInt());
+    m_fullscreenEnabled = settings.value(QStringLiteral("fullscreenEnabled"), true).toBool();
+    m_fullscreenIntervalSec = clampIntervalSec(
+        settings.value(QStringLiteral("fullscreenIntervalSec"), DEFAULT_FULLSCREEN_INTERVAL_SEC).toInt());
+    m_pauseInVm = settings.value(QStringLiteral("pauseInVm"), true).toBool();
+}
+
+void RemainerApp::saveSettings()
+{
+    QSettings settings = appSettings();
+    settings.setValue(QStringLiteral("settingsConfigured"), m_settingsConfigured);
+    settings.setValue(QStringLiteral("shapesEnabled"), m_shapesEnabled);
+    settings.setValue(QStringLiteral("shapesIntervalSec"), m_shapesIntervalSec);
+    settings.setValue(QStringLiteral("fullscreenEnabled"), m_fullscreenEnabled);
+    settings.setValue(QStringLiteral("fullscreenIntervalSec"), m_fullscreenIntervalSec);
+    settings.setValue(QStringLiteral("pauseInVm"), m_pauseInVm);
+    settings.sync();
+}
+
+bool RemainerApp::openSettingsDialog()
+{
+    const bool timerWasActive = m_inactivityTimer && m_inactivityTimer->isActive();
+    if (timerWasActive) {
+        m_inactivityTimer->stop();
+        m_currentState = Normal;
+        hideAllEffects();
+    }
+
+    SettingsDialog::Values current;
+    current.shapesEnabled = m_shapesEnabled;
+    current.shapesIntervalSec = m_shapesIntervalSec;
+    current.fullscreenEnabled = m_fullscreenEnabled;
+    current.fullscreenIntervalSec = m_fullscreenIntervalSec;
+
+    SettingsDialog dialog(current);
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    if (accepted) {
+        const SettingsDialog::Values chosen = dialog.values();
+        m_shapesEnabled = chosen.shapesEnabled;
+        m_shapesIntervalSec = clampIntervalSec(chosen.shapesIntervalSec);
+        m_fullscreenEnabled = chosen.fullscreenEnabled;
+        m_fullscreenIntervalSec = clampIntervalSec(chosen.fullscreenIntervalSec);
+    }
+
+    if (timerWasActive) {
+        m_elapsedTimer.restart();
+        m_inactivityTimer->start();
+    }
+    return accepted;
+}
+
+void RemainerApp::onSettingsAction()
+{
+    if (!openSettingsDialog())
+        return;
+
+    saveSettings();
+    reevaluateInactivity();
+}
+
+void RemainerApp::onPauseInVmToggled(bool checked)
+{
+    const bool wasHolding = m_pauseInVm && isVirtualMachineForeground();
+    m_pauseInVm = checked;
+    saveSettings();
+    if (wasHolding && !checked)
+        m_elapsedTimer.restart();
+    reevaluateInactivity();
+}
+
+RemainerApp::InactivityState RemainerApp::stateForElapsed(qint64 elapsedMs) const
+{
+    if (m_fullscreenEnabled
+        && elapsedMs >= static_cast<qint64>(m_fullscreenIntervalSec) * 1000) {
+        return FiveMinutes;
+    }
+    if (m_shapesEnabled
+        && elapsedMs >= static_cast<qint64>(m_shapesIntervalSec) * 1000) {
+        return TenSeconds;
+    }
+    return Normal;
+}
+
+void RemainerApp::reevaluateInactivity()
+{
+    if (!m_isActive || m_isStopped)
+        return;
+    if (!m_inactivityTimer || !m_inactivityTimer->isActive())
+        return;
+
+    if (m_pauseInVm && isVirtualMachineForeground()) {
+        if (m_currentState != Normal)
+            hideAllEffects();
+        m_currentState = Normal;
+        m_elapsedTimer.restart();
+        return;
+    }
+
+    const InactivityState newState = stateForElapsed(m_elapsedTimer.elapsed());
+    if (newState != m_currentState) {
+        m_currentState = newState;
+        updateInactivityState();
+    }
+}
+
+bool RemainerApp::isVirtualMachineForeground() const
+{
+#ifdef Q_OS_WIN
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd)
+        return false;
+
+    static const wchar_t *vmExes[] = {
+        L"virtualbox.exe",
+        L"virtualboxvm.exe",
+        L"vboxsdl.exe",
+        L"vmware.exe",
+        L"vmware-vmx.exe",
+        L"vmplayer.exe",
+        L"qemu-system-x86_64.exe",
+        L"vmconnect.exe"
+    };
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    bool identifiedProcess = false;
+    if (pid != 0) {
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (process) {
+            wchar_t path[4096];
+            DWORD size = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
+            if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+                identifiedProcess = true;
+                const wchar_t *fileName = path;
+                for (const wchar_t *cursor = path; *cursor; ++cursor) {
+                    if (*cursor == L'\\' || *cursor == L'/')
+                        fileName = cursor + 1;
+                }
+                for (const wchar_t *exe : vmExes) {
+                    if (CompareStringW(LOCALE_INVARIANT, NORM_IGNORECASE, fileName, -1, exe, -1) == CSTR_EQUAL) {
+                        CloseHandle(process);
+                        return true;
+                    }
+                }
+            }
+            CloseHandle(process);
+        }
+    }
+
+    if (identifiedProcess)
+        return false;
+
+    wchar_t title[512];
+    const int length = GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    if (length <= 0)
+        return false;
+
+    const QString text = QString::fromWCharArray(title, length);
+    return text.contains(QLatin1String("VirtualBox"), Qt::CaseInsensitive)
+        || text.contains(QLatin1String("VMware"), Qt::CaseInsensitive);
+#else
+    return false;
+#endif
 }
